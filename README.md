@@ -98,14 +98,6 @@ add it to the macro **at host level**, not in the template.
    Frontend: Data collection -> Templates -> Import -> `template_alcatel_stellar_ap_snmp.yaml`.
    Keep "Create new" and "Update existing" checked for all sections.
 
-4. **Test on a single AP before rolling out to the rest.**
-   Create one host by hand, link the template, and on
-   Discovery rules -> "Network interface discovery" -> Execute now.
-   You should see 4-5 interfaces (`eth0`, `eth1`, `wifi0`, `wifi1`, `br-wan`), NOT ~40.
-   If ~40 show up, the filter isn't applying: check `{$NET.IF.IFNAME.MATCHES}` at host
-   level. This step isn't optional: extra discovered items don't disappear once you
-   fix the filter — they become "lost resources" and have to be cleaned up by hand.
-
 5. **Create the remaining hosts** (frontend, API, or your own automation), linking the
    template and setting `{$SNMP_COMMUNITY}` and `{$NET.IF.IFNAME.MATCHES}` at host level.
 
@@ -126,15 +118,6 @@ gaps in the template, they're the honest ceiling of what SNMP exposes on these A
    counts, use the AP's web UI or OmniVista.
 4. **Firmware drift is detected at the minor-version level, not patch level.**
    `sysDescr` returns `4.0.7`, without the `.14`.
-
-## Pending items to validate in your environment
-
-- **Static IPs vs. DHCP**: if hosts are created by IP and your APs get DHCP addresses
-  without a reservation, monitoring breaks silently when the address changes.
-- **Cluster virtual IP**: if one exists, consider monitoring it in addition to the PVM.
-- **Memory threshold on lower-RAM models**: the OAW-AP1101 has roughly half the RAM of
-  the OAW-AP1221 (~120 MB vs. ~232 MB). If the default 90% threshold is noisy on those
-  units, override `{$AP.MEM.UTIL.WARN}` at host level rather than lowering it template-wide.
 
 ## License
 
