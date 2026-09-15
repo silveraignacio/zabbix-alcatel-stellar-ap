@@ -1,0 +1,415 @@
+zabbix_export:
+  version: '7.2'
+  template_groups:
+    - uuid: cefbd883ccbd4257856875ccf884597a
+      name: 'Templates/Network devices'
+  templates:
+    - uuid: d61aabe568434830bc6baf3a86f2ba9c
+      template: 'Alcatel Stellar AP by SNMP'
+      name: 'Alcatel Stellar AP by SNMP'
+      description: |
+        Template for Alcatel-Lucent Enterprise Stellar access points (OAW-AP1101 / OAW-AP1221) in Express mode (PVM/SVM/Member cluster).
+        Validated firmware: AWOS 4.0.7.x
+
+        Based on OIDs verified with snmpwalk against real hardware:
+          - MIB-II (sysDescr, sysName, sysUpTime, IF-MIB)
+          - HOST-RESOURCES-MIB (memory, storage, system uptime)
+          - UCD-SNMP-MIB (detailed memory)
+          - enterprises.6486.802 (MAC, ALE private branch - only usable leaf)
+
+        CONFIRMED LIMITATIONS (not template omissions):
+
+        1. The ALE private branch (enterprises.6486) is UNUSABLE. The agent echoes back the
+           queried OID: snmpgetnext .6486.801 returns .6486.801 (it should return a *larger*
+           OID), and snmpget on .6486.802 returns "No Such Object". Zabbix cannot read it with
+           a plain GET. Each AP also returns its own MAC, not the cluster leader's, so this
+           branch wouldn't help detect failover either.
+
+        2. Cluster role (PVM/SVM/Member) and failover CANNOT be detected via SNMP.
+           Workaround: monitor PVM and SVM as separate hosts and alert on unavailability.
+
+        3. Associated client count CANNOT be obtained. The 802.11 MIB only exposes
+           configuration and PHY groups (dot11StationConfig, dot11AuthenticationAlgorithms,
+           dot11Privacy, dot11PhyOFDM); it does not expose an associated-stations table.
+           For client counts, use the AP's web UI or OmniVista.
+
+        Requires the following Zabbix 7.2 stock templates to already exist in the instance:
+        Generic by SNMP, Interfaces by SNMP. They are linked automatically on import.
+        (Do NOT also link "ICMP Ping": "Generic by SNMP" already provides the icmpping items
+        and ICMP triggers; linking both makes the import fail on an "icmpping" key collision.)
+
+        4. sysDescr only exposes "4.0.7", not "4.0.7.14". The firmware-drift trigger detects
+           minor-version differences between APs, but NOT patch-level differences.
+
+        Uptime and SNMP-availability items are not defined here: they are provided by
+        'Generic by SNMP' (system.hw.uptime[hrSystemUptime.0] and zabbix[host,snmp,available],
+        each with its own trigger). Duplicating them would fail the import on a key collision.
+      groups:
+        - name: 'Templates/Network devices'
+      templates:
+        - name: 'Generic by SNMP'
+        - name: 'Interfaces by SNMP'
+      items:
+        - uuid: 660c0bdb78f648b8aa5d88f50e598b31
+          name: 'AP: Firmware version'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.2.1.1.1.0
+          key: ap.firmware
+          delay: 1h
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          description: 'AWOS version extracted from sysDescr (e.g. "OAW-AP1221 4.0.7" -> "4.0.7")'
+          inventory_link: SOFTWARE
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - '\s([0-9]+\.[0-9]+\.[0-9.]+)\s*$'
+                - \1
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: system
+            - tag: component
+              value: firmware
+          triggers:
+            - uuid: 070dca5a03d64cc6972f2672e8ed3e12
+              expression: 'last(/Alcatel Stellar AP by SNMP/ap.firmware)<>"{$AP.FW.EXPECTED}"'
+              name: 'AP: Firmware differs from expected'
+              event_name: 'AP: Firmware {ITEM.VALUE} differs from expected ({$AP.FW.EXPECTED})'
+              priority: INFO
+              description: |
+                Detects firmware drift between APs in the cluster.
+                Adjust the {$AP.FW.EXPECTED} macro to the value that applies.
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+
+        - uuid: b784a2ecc4004829b3e4814ff4dd3302
+          name: 'AP: Model'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.2.1.1.1.0
+          key: ap.model
+          delay: 1h
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          description: 'AP model extracted from sysDescr (e.g. OAW-AP1221)'
+          inventory_link: MODEL
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - '^(\S+)'
+                - \1
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: system
+
+        - uuid: 5dcfb4cf27034653b22326671e4391c2
+          name: 'AP: CPU utilization'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.11.11.0
+          key: ap.cpu.util
+          delay: 1m
+          history: 7d
+          value_type: FLOAT
+          units: '%'
+          description: |
+            Computed as 100 - UCD-SNMP-MIB::ssCpuIdle.
+            AP1221 and AP1101 report 4 cores; this value is the system-wide aggregate.
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - 'return 100 - value;'
+          tags:
+            - tag: component
+              value: cpu
+          triggers:
+            - uuid: 9f99d7ad0e084d0ca3c929bab7b6df58
+              expression: 'min(/Alcatel Stellar AP by SNMP/ap.cpu.util,15m)>{$AP.CPU.UTIL.WARN}'
+              name: 'AP: High CPU usage (>{$AP.CPU.UTIL.WARN}%)'
+              priority: WARNING
+              description: 'Sustained for 15 minutes. An AP pegged on CPU usually degrades service before it drops.'
+              tags:
+                - tag: scope
+                  value: performance
+
+        - uuid: e2e5ba700be0439fa3c46a416db0fd4b
+          name: 'AP: CPU user time'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.11.9.0
+          key: ap.cpu.user
+          delay: 1m
+          history: 7d
+          value_type: FLOAT
+          units: '%'
+          description: 'UCD-SNMP-MIB::ssCpuUser'
+          tags:
+            - tag: component
+              value: cpu
+
+        - uuid: b565ccebf89c4863a5a7420cb8d1009c
+          name: 'AP: CPU system time'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.11.10.0
+          key: ap.cpu.system
+          delay: 1m
+          history: 7d
+          value_type: FLOAT
+          units: '%'
+          description: 'UCD-SNMP-MIB::ssCpuSystem'
+          tags:
+            - tag: component
+              value: cpu
+
+        - uuid: 2d8b50395b55423aaa76ee4e7e798280
+          name: 'AP: Load average (1m)'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.10.1.3.1
+          key: ap.cpu.load1
+          delay: 1m
+          history: 7d
+          value_type: FLOAT
+          description: 'UCD-SNMP-MIB::laLoad.1'
+          tags:
+            - tag: component
+              value: cpu
+
+        - uuid: e22bbcaece1a4bac80fa2047875dcce9
+          name: 'AP: Load average (5m)'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.10.1.3.2
+          key: ap.cpu.load5
+          delay: 1m
+          history: 7d
+          value_type: FLOAT
+          description: 'UCD-SNMP-MIB::laLoad.2'
+          tags:
+            - tag: component
+              value: cpu
+
+        - uuid: 272b47738dc84e12bd6091f855288cb7
+          name: 'AP: Load average (15m)'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.10.1.3.3
+          key: ap.cpu.load15
+          delay: 1m
+          history: 7d
+          value_type: FLOAT
+          description: 'UCD-SNMP-MIB::laLoad.3'
+          tags:
+            - tag: component
+              value: cpu
+
+        - uuid: f4133db9b430492a9011fba3238caaed
+          name: 'AP: Memory total'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.4.5.0
+          key: ap.mem.total
+          delay: 5m
+          history: 7d
+          units: B
+          description: 'UCD-SNMP-MIB::memTotalReal'
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '1024'
+          tags:
+            - tag: component
+              value: memory
+
+        - uuid: 3304c15e9c2b470e81d76054b0ae67b2
+          name: 'AP: Memory available'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.4.6.0
+          key: ap.mem.avail
+          delay: 5m
+          history: 7d
+          units: B
+          description: 'UCD-SNMP-MIB::memAvailReal'
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '1024'
+          tags:
+            - tag: component
+              value: memory
+
+        - uuid: e8c904e60b1a4723b6ebf1d71e58fc2a
+          name: 'AP: Memory cached'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.4.15.0
+          key: ap.mem.cached
+          delay: 5m
+          history: 7d
+          units: B
+          description: 'UCD-SNMP-MIB::memCached'
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '1024'
+          tags:
+            - tag: component
+              value: memory
+
+        - uuid: 6ccc62ba43a34ac896af3a993ad8d758
+          name: 'AP: Memory buffers'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.2021.4.14.0
+          key: ap.mem.buffers
+          delay: 5m
+          history: 7d
+          units: B
+          description: 'UCD-SNMP-MIB::memBuffer'
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '1024'
+          tags:
+            - tag: component
+              value: memory
+
+        - uuid: ce390c5e0fcd4e6a885bd52b0f834242
+          name: 'AP: Memory utilization'
+          type: CALCULATED
+          key: ap.mem.pused
+          delay: 5m
+          history: 7d
+          value_type: FLOAT
+          units: '%'
+          params: |
+            100 * ( last(//ap.mem.total) - ( last(//ap.mem.avail) + last(//ap.mem.cached) + last(//ap.mem.buffers) ) ) / last(//ap.mem.total)
+          description: |
+            Memory actually in use, netting out cache and buffers (which the kernel frees
+            under pressure). Margins are tight, especially on the OAW-AP1101 (~120 MB RAM).
+          tags:
+            - tag: component
+              value: memory
+          triggers:
+            - uuid: c1e84bb49a9d445c83790f241300932e
+              expression: 'min(/Alcatel Stellar AP by SNMP/ap.mem.pused,10m)>{$AP.MEM.UTIL.WARN}'
+              name: 'AP: High memory usage (>{$AP.MEM.UTIL.WARN}%)'
+              priority: WARNING
+              description: 'Sustained for 10 minutes to avoid false positives from spikes.'
+              tags:
+                - tag: scope
+                  value: performance
+
+
+      discovery_rules:
+        - uuid: 19dff56362b9421c8ae5a4030da4503c
+          name: 'AP: Storage discovery'
+          type: SNMP_AGENT
+          snmp_oid: 'discovery[{#FSNAME},1.3.6.1.2.1.25.2.3.1.3,{#FSTYPE},1.3.6.1.2.1.25.2.3.1.2,{#ALLOC_UNITS},1.3.6.1.2.1.25.2.3.1.4]'
+          key: ap.storage.discovery
+          delay: 1h
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#FSTYPE}'
+                value: '.*(\.4|hrStorageFixedDisk)$'
+                formulaid: A
+              - macro: '{#FSNAME}'
+                value: '{$AP.FS.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+          description: 'Discovers filesystems from HOST-RESOURCES-MIB::hrStorageTable.'
+          item_prototypes:
+            - uuid: f7d4d63ad5b5434f9ec18aef30622492
+              name: '{#FSNAME}: Space utilization'
+              type: CALCULATED
+              key: 'ap.fs.pused[{#SNMPINDEX}]'
+              delay: 5m
+              history: 7d
+              value_type: FLOAT
+              units: '%'
+              params: '100 * last(//ap.fs.used[{#SNMPINDEX}]) / last(//ap.fs.total[{#SNMPINDEX}])'
+              tags:
+                - tag: component
+                  value: storage
+                - tag: filesystem
+                  value: '{#FSNAME}'
+              trigger_prototypes:
+                - uuid: 0ef0148c65a2439a9b16ac265261097e
+                  expression: 'min(/Alcatel Stellar AP by SNMP/ap.fs.pused[{#SNMPINDEX}],10m)>{$AP.FS.PUSED.WARN}'
+                  name: '{#FSNAME}: High space usage (>{$AP.FS.PUSED.WARN}%)'
+                  priority: WARNING
+                  tags:
+                    - tag: scope
+                      value: capacity
+
+            - uuid: b458a2c61c7c46ec90855753db2fd132
+              name: '{#FSNAME}: Total space'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.2.1.25.2.3.1.5.{#SNMPINDEX}'
+              key: 'ap.fs.total[{#SNMPINDEX}]'
+              delay: 5m
+              history: 7d
+              units: B
+              description: 'hrStorageSize x hrStorageAllocationUnits'
+              preprocessing:
+                - type: MULTIPLIER
+                  parameters:
+                    - '{#ALLOC_UNITS}'
+              tags:
+                - tag: component
+                  value: storage
+                - tag: filesystem
+                  value: '{#FSNAME}'
+
+            - uuid: cc64abfe448543f29255998c672426aa
+              name: '{#FSNAME}: Used space'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.2.1.25.2.3.1.6.{#SNMPINDEX}'
+              key: 'ap.fs.used[{#SNMPINDEX}]'
+              delay: 5m
+              history: 7d
+              units: B
+              preprocessing:
+                - type: MULTIPLIER
+                  parameters:
+                    - '{#ALLOC_UNITS}'
+              tags:
+                - tag: component
+                  value: storage
+                - tag: filesystem
+                  value: '{#FSNAME}'
+
+      macros:
+        - macro: '{$AP.FW.EXPECTED}'
+          value: 4.0.7
+          description: 'Expected firmware version across the whole cluster. Fires the drift trigger if it differs.'
+        - macro: '{$AP.CPU.UTIL.WARN}'
+          value: '85'
+          description: 'CPU usage threshold (%).'
+        - macro: '{$AP.MEM.UTIL.WARN}'
+          value: '90'
+          description: |
+            Memory usage threshold (%).
+            HEADS UP: OAW-AP1221 units have ~232 MB RAM but OAW-AP1101 units only ~120 MB,
+            and during the initial survey one AP1101 was down to just 17 MB free.
+            Consider overriding this macro at host level on AP1101 units if it gets noisy.
+        - macro: '{$AP.FS.PUSED.WARN}'
+          value: '90'
+          description: 'Filesystem usage threshold (%).'
+        - macro: '{$AP.FS.NAME.NOT_MATCHES}'
+          value: '^(/dev|/sys|/run|/proc|.+/shm$)'
+          description: 'Filesystems excluded from discovery.'
+        - macro: '{$SNMP_COMMUNITY}'
+          value: '<set at host or global level>'
+          description: 'SNMPv2c community. Do NOT hardcode it in the template.'
+        - macro: '{$NET.IF.IFNAME.MATCHES}'
+          value: '^(eth[01]|wifi[01]|br-wan)$'
+          description: |
+            CRITICAL: Stellar APs expose ~40 interfaces (VAPs ath0xx/ath1xx, br-vlanXX bridges,
+            eth0-XX subinterfaces, tunnels). Without this filter, LLD would create hundreds of
+            items per AP. wifi0 = 2.4 GHz radio, wifi1 = 5 GHz radio, eth0/eth1 = wired uplinks.
+        - macro: '{$NET.IF.IFNAME.NOT_MATCHES}'
+          value: '^$'
+          description: 'Default NOT_MATCHES neutralized: filtering is done via MATCHES instead.'
